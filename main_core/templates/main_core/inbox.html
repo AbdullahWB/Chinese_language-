@@ -1,0 +1,560 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/messaging.css' %}">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+{% endblock %}
+
+{% block content %}
+<div class="messaging-container">
+    <!-- Contacts List -->
+    <div class="contacts-list">
+        <h3 class="contacts-header">Conversations</h3>
+        <div class="message-search">
+            <input type="text" id="contact-search" placeholder="Search conversations...">
+        </div>
+        {% for connection in connections %}
+        <div class="contact-item" data-user-id="{{ connection.id }}" onclick="loadChat({{ connection.id }})">
+            <div class="contact-avatar">
+                {{ connection.username|make_list|first|upper }}
+            </div>
+            <div class="contact-info">
+                <div class="contact-name">
+                    {{ connection.username }}
+                    <span class="online-status {% if connection.is_online %}online{% else %}offline{% endif %}"
+                          title="{{ connection.is_online|yesno:'Online,Offline' }}">
+                    </span>
+                </div>
+                <div class="last-message">
+                    {{ connection.last_message|default:"No messages yet"|truncatechars:30 }}
+                </div>
+            </div>
+            {% if connection.unread_count > 0 %}
+            <span class="unread-count">{{ connection.unread_count }}</span>
+            {% endif %}
+        </div>
+        {% empty %}
+        <div class="empty-contacts">
+            <i class="fas fa-user-friends"></i>
+            <p>No connections yet</p>
+            <a href="{% url 'main_core:user_connections' %}" class="find-friends-btn">Find Friends</a>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- Chat Area -->
+    <div class="chat-area">
+        <div id="initial-chat-state" class="empty-chat">
+            <i class="fas fa-comments"></i>
+            <p>Select a conversation to start messaging</p>
+        </div>
+        
+        <div id="chat-content" style="display: none; flex-direction: column; height: 100%;">
+            <div class="chat-header">
+                <div class="contact-avatar" id="chat-user-avatar"></div>
+                <div class="contact-info">
+                    <div class="contact-name">
+                        <span id="chat-user-name"></span>
+                        <span class="online-status" id="chat-user-status"></span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="message-search">
+                <input type="text" id="message-search" placeholder="Search in conversation...">
+            </div>
+
+            <div class="chat-messages" id="messages-container"></div>
+
+            <div id="typing-indicator" class="typing-indicator" style="display: none;">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+
+            <div class="chat-input">
+                <div class="input-group">
+                    <input type="text" class="message-input" id="message-input" placeholder="Type your message...">
+                    <button class="send-button" id="send-button">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Message Context Menu -->
+<div class="message-context-menu" id="message-context-menu">
+    <div class="message-context-menu-item" onclick="copyMessage()">
+        <i class="fas fa-copy"></i> Copy
+    </div>
+    <div class="message-context-menu-item" onclick="deleteMessage()">
+        <i class="fas fa-trash"></i> Delete
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let currentChatUser = null;
+let currentUserName = '';
+let csrfToken = '{{ csrf_token }}';
+let typingTimeout = null;
+let lastMessageId = null;
+
+// When the page loads
+document.addEventListener('DOMContentLoaded', function() {
+    // Set up event listeners
+    document.getElementById('send-button').addEventListener('click', sendMessage);
+    document.getElementById('message-input').addEventListener('keypress', handleMessageInput);
+    document.getElementById('message-input').addEventListener('input', handleTyping);
+    document.getElementById('contact-search').addEventListener('input', filterContacts);
+    document.getElementById('message-search').addEventListener('input', searchMessages);
+    
+    // Close context menu when clicking outside
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('.message-context-menu')) {
+            document.getElementById('message-context-menu').classList.remove('show');
+        }
+    });
+    
+    // If URL has a user ID parameter, load that chat
+    const urlParams = new URLSearchParams(window.location.search);
+    const userId = urlParams.get('user');
+    if (userId) {
+        loadChat(userId);
+    }
+});
+
+function handleMessageInput(e) {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        sendMessage();
+    }
+}
+
+function handleTyping() {
+    if (!currentChatUser) return;
+    
+    // Clear existing timeout
+    if (typingTimeout) {
+        clearTimeout(typingTimeout);
+    }
+    
+    // Send typing status
+    fetch(`/api/typing/${currentChatUser}/`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': csrfToken
+        }
+    });
+    
+    // Set new timeout
+    typingTimeout = setTimeout(() => {
+        // Clear typing status after 3 seconds of no input
+    }, 3000);
+}
+
+function filterContacts(e) {
+    const searchTerm = e.target.value.toLowerCase();
+    document.querySelectorAll('.contact-item').forEach(item => {
+        const name = item.querySelector('.contact-name').textContent.toLowerCase();
+        const lastMessage = item.querySelector('.last-message').textContent.toLowerCase();
+        if (name.includes(searchTerm) || lastMessage.includes(searchTerm)) {
+            item.style.display = 'flex';
+        } else {
+            item.style.display = 'none';
+        }
+    });
+}
+
+function searchMessages(e) {
+    const searchTerm = e.target.value.toLowerCase();
+    document.querySelectorAll('.message-content').forEach(content => {
+        const text = content.textContent.toLowerCase();
+        if (text.includes(searchTerm)) {
+            content.innerHTML = content.textContent.replace(
+                new RegExp(searchTerm, 'gi'),
+                match => `<span class="highlight">${match}</span>`
+            );
+            content.closest('.message').style.display = 'block';
+        } else {
+            content.closest('.message').style.display = 'none';
+        }
+    });
+}
+
+function showMessageContextMenu(e, messageId) {
+    e.preventDefault();
+    const menu = document.getElementById('message-context-menu');
+    menu.style.left = e.pageX + 'px';
+    menu.style.top = e.pageY + 'px';
+    menu.classList.add('show');
+    lastMessageId = messageId;
+}
+
+function copyMessage() {
+    const message = document.querySelector(`[data-message-id="${lastMessageId}"] .message-content`);
+    if (message) {
+        navigator.clipboard.writeText(message.textContent);
+        showToast('Message copied to clipboard');
+    }
+    document.getElementById('message-context-menu').classList.remove('show');
+}
+
+function deleteMessage() {
+    if (confirm('Are you sure you want to delete this message?')) {
+        fetch(`/api/messages/${lastMessageId}/delete/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrfToken
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const message = document.querySelector(`[data-message-id="${lastMessageId}"]`);
+                if (message) {
+                    message.remove();
+                }
+                showToast('Message deleted');
+            } else {
+                showToast('Failed to delete message');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showToast('Failed to delete message');
+        });
+    }
+    document.getElementById('message-context-menu').classList.remove('show');
+}
+
+function showToast(message) {
+    const toast = document.createElement('div');
+    toast.className = 'error-toast';
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => {
+        toast.classList.add('show');
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 300);
+        }, 2000);
+    }, 100);
+}
+
+function formatRelativeTime(dateString) {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diff = now - date;
+    
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    
+    if (seconds < 60) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    if (days < 7) return `${days}d ago`;
+    return date.toLocaleDateString();
+}
+
+function loadChat(userId) {
+    currentChatUser = userId;
+    
+    // Update UI to show loading state
+    document.getElementById('initial-chat-state').style.display = 'none';
+    document.getElementById('chat-content').style.display = 'flex';
+    document.getElementById('messages-container').innerHTML = '<div class="loading">Loading messages...</div>';
+    
+    // Update active state of contact items
+    document.querySelectorAll('.contact-item').forEach(item => {
+        item.classList.remove('active');
+        if (item.dataset.userId == userId) {
+            item.classList.add('active');
+            
+            // Update chat header with user info
+            const userName = item.querySelector('.contact-name').textContent.trim();
+            const isOnline = item.querySelector('.online-status').classList.contains('online');
+            currentUserName = userName;
+            
+            document.getElementById('chat-user-name').textContent = userName;
+            document.getElementById('chat-user-avatar').textContent = userName.charAt(0).toUpperCase();
+            
+            const statusEl = document.getElementById('chat-user-status');
+            statusEl.classList.remove('online', 'offline');
+            statusEl.classList.add(isOnline ? 'online' : 'offline');
+            statusEl.title = isOnline ? 'Online' : 'Offline';
+        }
+    });
+
+    // Fetch messages
+    fetch(`/api/messages/${userId}/`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (data.status === 'success') {
+                displayMessages(data.messages);
+                
+                // Mark the message as read if there are unread messages
+                const unreadBadge = document.querySelector(`.contact-item[data-user-id="${userId}"] .unread-count`);
+                if (unreadBadge) {
+                    unreadBadge.style.display = 'none';
+                }
+            } else {
+                console.error('Error:', data.message);
+                document.getElementById('messages-container').innerHTML = 
+                    '<div class="error-message">Could not load messages. Please try again.</div>';
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            document.getElementById('messages-container').innerHTML = 
+                '<div class="error-message">Failed to connect to server. Please check your connection and try again.</div>';
+        });
+}
+
+function displayMessages(messages) {
+    const container = document.getElementById('messages-container');
+    container.innerHTML = '';
+    
+    if (messages.length === 0) {
+        container.innerHTML = '<div class="no-messages">No messages yet. Start the conversation!</div>';
+        return;
+    }
+    
+    let currentDate = null;
+    
+    messages.forEach(message => {
+        // Check if we need to add a date separator
+        const messageDate = new Date(message.created_at).toLocaleDateString();
+        if (messageDate !== currentDate) {
+            currentDate = messageDate;
+            
+            const dateSeparator = document.createElement('div');
+            dateSeparator.className = 'date-separator';
+            dateSeparator.textContent = formatDate(message.created_at);
+            container.appendChild(dateSeparator);
+        }
+        
+        const messageDiv = document.createElement('div');
+        const isSent = message.sender.id === {{ request.user.id }};
+        messageDiv.className = `message ${isSent ? 'sent' : 'received'}`;
+        messageDiv.dataset.messageId = message.id;
+        messageDiv.oncontextmenu = (e) => showMessageContextMenu(e, message.id);
+        
+        const content = document.createElement('div');
+        content.className = 'message-content';
+        content.textContent = message.content;
+        
+        const time = document.createElement('div');
+        time.className = 'message-time';
+        
+        const relativeTime = document.createElement('span');
+        relativeTime.textContent = formatRelativeTime(message.created_at);
+        
+        const absoluteTime = document.createElement('span');
+        absoluteTime.className = 'absolute-time';
+        absoluteTime.textContent = new Date(message.created_at).toLocaleString();
+        
+        time.appendChild(relativeTime);
+        time.appendChild(absoluteTime);
+        
+        // Add message status for sent messages
+        if (isSent) {
+            const status = document.createElement('span');
+            status.className = 'message-status';
+            if (message.is_read) {
+                status.innerHTML = '<i class="fas fa-check-double" title="Read"></i>';
+                status.classList.add('read');
+            } else if (message.is_delivered) {
+                status.innerHTML = '<i class="fas fa-check-double" title="Delivered"></i>';
+                status.classList.add('delivered');
+            } else {
+                status.innerHTML = '<i class="fas fa-check" title="Sent"></i>';
+                status.classList.add('sent');
+            }
+            time.appendChild(status);
+        }
+        
+        messageDiv.appendChild(content);
+        messageDiv.appendChild(time);
+        container.appendChild(messageDiv);
+    });
+    
+    // Scroll to bottom
+    container.scrollTop = container.scrollHeight;
+}
+
+function sendMessage() {
+    if (!currentChatUser) return;
+    
+    const input = document.getElementById('message-input');
+    const content = input.value.trim();
+    
+    if (!content) return;
+    
+    // Show sending indicator
+    const container = document.getElementById('messages-container');
+    const pendingDiv = document.createElement('div');
+    pendingDiv.className = 'message sent pending';
+    pendingDiv.innerHTML = `
+        <div class="message-content">${content}</div>
+        <div class="message-time">Sending...<span class="read-status"><i class="fas fa-clock"></i></span></div>
+    `;
+    container.appendChild(pendingDiv);
+    container.scrollTop = container.scrollHeight;
+    
+    // Clear input
+    input.value = '';
+    
+    fetch(`/send-message/${currentChatUser}/`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': csrfToken
+        },
+        body: JSON.stringify({ content: content })
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error('Network response was not ok');
+        }
+        return response.json();
+    })
+    .then(data => {
+        // Remove pending message
+        container.removeChild(pendingDiv);
+        
+        if (data.status === 'success') {
+            // Add the confirmed message
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message sent';
+            messageDiv.innerHTML = `
+                <div class="message-content">${data.message.content}</div>
+                <div class="message-time">
+                    ${new Date(data.message.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                    <span class="read-status"><i class="fas fa-check" title="Delivered"></i></span>
+                </div>
+            `;
+            container.appendChild(messageDiv);
+            container.scrollTop = container.scrollHeight;
+            
+            // Update last message in contacts list
+            updateContactLastMessage(currentChatUser, content);
+        } else {
+            showErrorToast('Failed to send message: ' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        // Remove pending message
+        container.removeChild(pendingDiv);
+        // Show error
+        showErrorToast('Failed to send message. Please try again.');
+    });
+}
+
+function updateContactLastMessage(userId, content) {
+    const contactItem = document.querySelector(`.contact-item[data-user-id="${userId}"]`);
+    if (contactItem) {
+        const lastMessageEl = contactItem.querySelector('.last-message');
+        if (lastMessageEl) {
+            lastMessageEl.textContent = content.length > 30 ? content.substring(0, 27) + '...' : content;
+        }
+    }
+}
+
+function formatDate(dateString) {
+    const date = new Date(dateString);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    if (date.toDateString() === today.toDateString()) {
+        return 'Today';
+    } else if (date.toDateString() === yesterday.toDateString()) {
+        return 'Yesterday';
+    } else {
+        return date.toLocaleDateString();
+    }
+}
+
+function showErrorToast(message) {
+    // Create toast if it doesn't exist
+    let toast = document.getElementById('error-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'error-toast';
+        toast.className = 'error-toast';
+        document.body.appendChild(toast);
+    }
+    
+    toast.textContent = message;
+    toast.classList.add('show');
+    
+    setTimeout(() => {
+        toast.classList.remove('show');
+    }, 3000);
+}
+
+// Auto-refresh online status every 30 seconds
+setInterval(() => {
+    // Update status for all contacts
+    document.querySelectorAll('.contact-item').forEach(item => {
+        const userId = item.dataset.userId;
+        fetch(`/check_online_status/${userId}/`)
+            .then(response => response.json())
+            .then(data => {
+                const statusDot = item.querySelector('.online-status');
+                if (data.is_online) {
+                    statusDot.classList.add('online');
+                    statusDot.classList.remove('offline');
+                } else {
+                    statusDot.classList.add('offline');
+                    statusDot.classList.remove('online');
+                }
+                
+                // Update the current chat header status if needed
+                if (currentChatUser == userId) {
+                    const chatStatusDot = document.getElementById('chat-user-status');
+                    if (data.is_online) {
+                        chatStatusDot.classList.add('online');
+                        chatStatusDot.classList.remove('offline');
+                        chatStatusDot.title = 'Online';
+                    } else {
+                        chatStatusDot.classList.add('offline');
+                        chatStatusDot.classList.remove('online');
+                        chatStatusDot.title = 'Offline';
+                    }
+                }
+            })
+            .catch(error => console.error('Error updating status:', error));
+    });
+}, 30000);
+
+// Poll for new messages every 15 seconds
+setInterval(() => {
+    if (currentChatUser) {
+        fetch(`/api/messages/${currentChatUser}/`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    displayMessages(data.messages);
+                }
+            })
+            .catch(error => console.error('Error polling messages:', error));
+    }
+}, 15000);
+</script>
+{% endblock %} 
